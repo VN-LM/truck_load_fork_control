@@ -7,6 +7,8 @@
 
 namespace tlf {
 
+static constexpr double kClearanceEpsilonM = 5e-4;
+
 static bool finiteAll(const ControlInput& in) {
   auto finite = [](double v) { return std::isfinite(v); };
   return finite(in.dt_s) && finite(in.pitch_rad) && finite(in.pitch_rate_rad_s) && finite(in.s_m) &&
@@ -41,7 +43,8 @@ static SafetyStatus makeSafety(const ControllerConfig& cfg,
 
   const double min_clear = std::min(clearance_top_m, clearance_bottom_m);
 
-  if (min_clear < cfg.hard_threshold_m) {
+  // Allow a tiny tolerance to prevent numerical noise from causing STOP.
+  if (min_clear < (cfg.hard_threshold_m - kClearanceEpsilonM)) {
     s.level = SafetyLevel::STOP;
     s.code = (code_override == SafetyCode::None) ? SafetyCode::ClearanceHardViolated : code_override;
     s.message = message_override.empty() ? "STOP: hard clearance violated" : message_override;
@@ -242,7 +245,7 @@ DebugFrame Controller::step(const ControlInput& in) {
   const double pitch_rate_factor = clamp(1.0 - (std::abs(in.pitch_rate_rad_s) / (2.0 * cfg_.pitch_rate_jitter_threshold_rad_s)), 0.2, 1.0);
   const double base_speed = cfg_.base_speed_limit_m_s * speed_mult;
   double speed = base_speed * std::min(clearance_factor, pitch_rate_factor);
-  if (min_clear >= cfg_.hard_threshold_m) {
+  if (min_clear >= (cfg_.hard_threshold_m - kClearanceEpsilonM)) {
     speed = std::max(speed, cfg_.min_speed_limit_m_s * speed_mult * pitch_rate_factor);
   } else {
     speed = 0.0;

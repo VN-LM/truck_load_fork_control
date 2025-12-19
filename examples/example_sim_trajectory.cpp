@@ -11,10 +11,10 @@ static double clamp(double v, double lo, double hi) { return std::max(lo, std::m
 
 struct SimState {
   double time_s{0.0};
-  double s_m{-2.6};
+  double s_m{-3.6};
   double pitch_rad{0.0};
   double pitch_rate_rad_s{0.0};
-  double lift_m{0.15};  // Initial lift amount (relative to pivot base), not world z.
+  double lift_m{0.0};   // Lower initial lift to fit under door
   double tilt_rad{0.0};
   TerrainState terrain{TerrainState::Ground};
 };
@@ -50,8 +50,12 @@ static double floorZAtX(const EnvSpec& e, double x_m) {
 }
 
 static double ceilingZAtX(const EnvSpec& e, double x_m) {
+  // Inside container: use container ceiling height
   if (x_m >= e.door_x_m && x_m <= (e.door_x_m + e.container_len_m)) return e.container_h_m;
-  return 100.0;
+  // Outside container: use a conservative “virtual ceiling” equal to the door height.
+  // This prevents the controller from drifting upward to center within an unrealistically high outside ceiling,
+  // which can later cause a hard ceiling strike as the front of the load enters the container region.
+  return e.container_h_m;
 }
 
 static double pitchFromWheelContact(const EnvSpec& e,
@@ -82,9 +86,12 @@ int main(int argc, char** argv) {
   Controller controller;
   {
     ControllerConfig cfg;
-    cfg.margin_top_m = 0.08;
-    cfg.margin_bottom_m = 0.08;
-    cfg.warn_threshold_m = 0.20;
+    // Keep more headroom to the ceiling throughout.
+    // Note: total required (top+bottom) margin must remain physically feasible given rack height.
+    cfg.margin_top_m = 0.12;
+    cfg.margin_bottom_m = 0.04;
+    // Start slowing down earlier when clearance gets tight.
+    cfg.warn_threshold_m = 0.18;
 
     cfg.search_lift_half_range_m = 0.20;
     cfg.search_tilt_half_range_rad = 0.25;
@@ -93,8 +100,13 @@ int main(int argc, char** argv) {
 
     cfg.lookahead_s_m = 0.25;
 
-    cfg.base_lift_rate_limit_m_s = 0.35;
-    cfg.base_tilt_rate_limit_rad_s = 0.55;
+  // Disable lookahead for this simple open-loop sim.
+  // With a tall load near the doorway, enforcing feasibility at both s and (s + lookahead)
+  // using the same (lift, tilt) can be overly conservative and lead to stalling.
+  cfg.lookahead_s_m = 0.0;
+
+    cfg.base_lift_rate_limit_m_s = 0.18;
+    cfg.base_tilt_rate_limit_rad_s = 0.28;
     controller = Controller(cfg);
   }
   controller.reset();
@@ -111,21 +123,23 @@ int main(int argc, char** argv) {
   const EnvSpec envSpec;
 
   RackParams rack;
-  rack.height_m = 2.3;
-  rack.length_m = 2.3;
-  rack.mount_offset_m = {0.25, 0.05};
+  rack.height_m = 2.32;
+  rack.length_m = 2.2;
+  rack.mount_offset_m = {0.25, 0.00};  // Lower cargo mounting
 
   ForkliftParams fl;
 
   const double dt = 0.1;
-  const double v = 0.35;  // base forward speed
+  const double v = 0.1;  // base forward speed
 
   // Vehicle geometry used for pitch-from-wheel-contact model.
   const double wheelbase_m = 2.0;
   const double rear_to_mast_m = 0.1;
-  const double pivot_height_above_floor_m = 0.2;  // Mast pivot offset above local floor.
+  const double pivot_height_above_floor_m = 0.15;  // Lower mast pivot to reduce overall height
 
   fl.mast_pivot_height_m = pivot_height_above_floor_m;
+
+  double current_speed = 0.0;  // current forward speed for smooth acceleration
 
   for (int k = 0; k < 6000; ++k) {
     const double pitch = pitchFromWheelContact(envSpec, st.s_m, wheelbase_m, rear_to_mast_m);
@@ -166,10 +180,14 @@ int main(int argc, char** argv) {
     const double tilt_step = clamp(tilt_err, -fr.cmd.tilt_rate_limit_rad_s * dt, fr.cmd.tilt_rate_limit_rad_s * dt);
     st.tilt_rad += tilt_step;
 
-    // move forward with speed limit
-    const double speed = std::min(v, fr.cmd.speed_limit_m_s);
+    // move forward with speed limit and smooth acceleration
+    const double target_speed = std::min(v, fr.cmd.speed_limit_m_s);
+    const double accel_limit = 0.4;  // m/s² acceleration limit for smooth motion
+    const double speed_err = target_speed - current_speed;
+    const double speed_step = clamp(speed_err, -accel_limit * dt, accel_limit * dt);
+    current_speed += speed_step;
     // Move into container (+x): s increases.
-    st.s_m += speed * dt;
+    st.s_m += current_speed * dt;
 
     st.time_s += dt;
     st.pitch_rate_rad_s = pitch_rate;
@@ -178,7 +196,7 @@ int main(int argc, char** argv) {
 
     log.writeFrame(fr);
 
-    if (st.s_m > 3) break;
+    if (st.s_m > 5) break;
   }
 
   std::cout << "Wrote log: " << out_path << "\n";

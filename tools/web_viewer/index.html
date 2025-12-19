@@ -26,6 +26,7 @@
     canvas {
       border: 1px solid rgba(128,128,128,0.35);
       background: rgba(20,20,24,0.98);
+      cursor: move;
     }
     label {
       display: inline-block;
@@ -41,8 +42,8 @@
   <h2>TLF 侧视回放（CSV / JSONL）</h2>
   <div class="row">
     <div>
-      <canvas id="c" width="960" height="540"></canvas>
-      <div class="hint">提示：用“选择文件”读取本地 CSV/JSONL，不需要起服务。</div>
+      <canvas id="c" width="1280" height="720"></canvas>
+      <div class="hint">提示：用"选择文件"读取本地 CSV/JSONL，不需要起服务。鼠标滚轮缩放，拖拽平移。</div>
     </div>
 
     <div class="panel">
@@ -89,6 +90,14 @@
         <span class="hint">每 N 帧取一帧</span>
       </div>
 
+      <div class="hint">视图缩放</div>
+      <div>
+        <label>缩放比例</label>
+        <input id="zoom" type="range" min="50" max="300" value="100" style="width:200px" />
+        <span id="zoomText" class="mono">100%</span>
+        <button id="resetView">重置视图</button>
+      </div>
+
       <hr />
 
       <div class="mono" id="telemetry"></div>
@@ -125,6 +134,10 @@
     const trimEndInput = document.getElementById('trimEnd');
     const strideInput = document.getElementById('stride');
 
+    const zoomSlider = document.getElementById('zoom');
+    const zoomText = document.getElementById('zoomText');
+    const resetViewBtn = document.getElementById('resetView');
+
     const playBtn = document.getElementById('play');
     const pauseBtn = document.getElementById('pause');
     const stepBtn = document.getElementById('step');
@@ -141,6 +154,11 @@
       xmin: -2.0, xmax: 2.2,
       zmin: -0.8, zmax: 3.0,
     };
+
+    let viewScale = 1.0;
+    let viewOffsetX = 0;
+    let viewOffsetZ = 0;
+    let baseWorld = {...world};
 
     let modelCfg = {
       units: 'm',
@@ -283,13 +301,13 @@
 
     function computeViewTransform() {
       const pad = 24;
-      const dx = Math.max(1e-9, world.xmax - world.xmin);
-      const dz = Math.max(1e-9, world.zmax - world.zmin);
+      const dx = Math.max(1e-9, (world.xmax - world.xmin) / viewScale);
+      const dz = Math.max(1e-9, (world.zmax - world.zmin) / viewScale);
       const sx = (canvas.width - 2 * pad) / dx;
       const sz = (canvas.height - 2 * pad) / dz;
       const scale = Math.max(1e-6, Math.min(sx, sz));
-      const cx = 0.5 * (world.xmin + world.xmax);
-      const cz = 0.5 * (world.zmin + world.zmax);
+      const cx = 0.5 * (world.xmin + world.xmax) + viewOffsetX;
+      const cz = 0.5 * (world.zmin + world.zmax) + viewOffsetZ;
       return { scale, cx, cz };
     }
 
@@ -644,7 +662,7 @@
       ctx.fillText(`t=${s.time.toFixed(2)}s  s=${s.s.toFixed(2)}m`, 12, 20);
       ctx.fillText(`pitch(log)=${(s.pitch*180/Math.PI).toFixed(2)}deg  pitch(wheels)=${(chassisPitch*180/Math.PI).toFixed(2)}deg`, 12, 38);
       ctx.fillText(`lift=${s.lift.toFixed(3)}m  tilt=${(s.tilt*180/Math.PI).toFixed(2)}deg`, 12, 56);
-      ctx.fillText(`clear_top=${s.clearance_top.toFixed(3)}m  clear_bottom=${s.clearance_bottom.toFixed(3)}m  speed=${s.speed_limit.toFixed(2)}m/s`, 12, 74);
+      ctx.fillText(`clear_top=${s.clearance_top.toFixed(3)}m  clear_bottom=${s.clearance_bottom.toFixed(3)}m`, 12, 74);
       ctx.fillText(`safety=${s.safety_level}  terrain=${s.terrain_state}  worst=${s.worst_point_id}`, 12, 92);
     }
 
@@ -747,6 +765,13 @@
         playing = false;
         statusEl.textContent = `已加载：${f.name}  frames=${samples.length}`;
         statusEl.className = 'hint';
+        baseWorld = computeWorldBounds(samples);
+        world = {...baseWorld};
+        viewScale = 1.0;
+        viewOffsetX = 0;
+        viewOffsetZ = 0;
+        zoomSlider.value = '100';
+        zoomText.textContent = '100%';
         rebuildFiltered();
       } catch (e) {
         statusEl.textContent = `解析失败：${e}`;
@@ -796,6 +821,64 @@
     trimStartInput.addEventListener('change', rebuildFiltered);
     trimEndInput.addEventListener('change', rebuildFiltered);
     strideInput.addEventListener('change', rebuildFiltered);
+
+    zoomSlider.addEventListener('input', () => {
+      viewScale = Number(zoomSlider.value) / 100.0;
+      zoomText.textContent = `${zoomSlider.value}%`;
+      render();
+    });
+
+    resetViewBtn.addEventListener('click', () => {
+      viewScale = 1.0;
+      viewOffsetX = 0;
+      viewOffsetZ = 0;
+      zoomSlider.value = '100';
+      zoomText.textContent = '100%';
+      render();
+    });
+
+    // Mouse wheel zoom
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      viewScale = Math.max(0.5, Math.min(3.0, viewScale * delta));
+      zoomSlider.value = String(Math.round(viewScale * 100));
+      zoomText.textContent = `${Math.round(viewScale * 100)}%`;
+      render();
+    });
+
+    // Mouse drag to pan
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartZ = 0;
+    let dragOffsetX = 0;
+    let dragOffsetZ = 0;
+
+    canvas.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      dragStartX = e.clientX;
+      dragStartZ = e.clientY;
+      dragOffsetX = viewOffsetX;
+      dragOffsetZ = viewOffsetZ;
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const view = computeViewTransform();
+      const dx = (e.clientX - dragStartX) / view.scale;
+      const dz = -(e.clientY - dragStartZ) / view.scale;
+      viewOffsetX = dragOffsetX - dx;
+      viewOffsetZ = dragOffsetZ - dz;
+      render();
+    });
+
+    canvas.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      isDragging = false;
+    });
 
     playBtn.addEventListener('click', () => { playing = true; });
     pauseBtn.addEventListener('click', () => { playing = false; });
