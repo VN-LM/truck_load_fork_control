@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
 
     log.writeFrame(fr);
 
-    if (st.s_m > 11.5) break;
+    if (st.s_m > 3) break;
   }
 
   std::cout << "Wrote log: " << out_path << "\n";
