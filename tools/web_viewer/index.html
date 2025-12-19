@@ -1,0 +1,812 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TLF Web Viewer (2D Side View)</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 16px;
+    }
+    .row {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .panel {
+      min-width: 320px;
+      max-width: 420px;
+    }
+    .panel > * { margin: 8px 0; }
+    canvas {
+      border: 1px solid rgba(128,128,128,0.35);
+      background: rgba(20,20,24,0.98);
+    }
+    label {
+      display: inline-block;
+      min-width: 120px;
+    }
+    input[type="range"] { width: 360px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .hint { opacity: 0.8; font-size: 13px; }
+    .bad { color: #d33; }
+  </style>
+</head>
+<body>
+  <h2>TLF 侧视回放（CSV / JSONL）</h2>
+  <div class="row">
+    <div>
+      <canvas id="c" width="960" height="540"></canvas>
+      <div class="hint">提示：用“选择文件”读取本地 CSV/JSONL，不需要起服务。</div>
+    </div>
+
+    <div class="panel">
+      <div>
+        <div>
+          <input id="file" type="file" accept=".csv,.jsonl,.json" />
+        </div>
+        <div>
+          <input id="cfg" type="file" accept=".json" />
+          <button id="saveCfg">Save config</button>
+          <div class="hint">配置文件示例：tools/web_viewer/model_config_default.json</div>
+        </div>
+        <div id="status" class="hint">未加载</div>
+      </div>
+
+      <div>
+        <button id="play">Play</button>
+        <button id="pause">Pause</button>
+        <button id="step">Step</button>
+      </div>
+
+      <div>
+        <label>Frame</label>
+        <input id="frame" type="range" min="0" max="0" value="0" />
+        <span id="frameText" class="mono"></span>
+      </div>
+
+      <div>
+        <label>FPS</label>
+        <input id="fps" type="range" min="1" max="60" value="30" />
+        <span id="fpsText" class="mono">30</span>
+      </div>
+
+      <div class="hint">裁剪与跳帧（单位：m / 帧）</div>
+      <div>
+        <label>起点向右</label>
+        <input id="trimStart" type="number" step="0.1" value="0" style="width:80px" />
+        <label>终点向左</label>
+        <input id="trimEnd" type="number" step="0.1" value="0" style="width:80px" />
+      </div>
+      <div>
+        <label>跳帧数</label>
+        <input id="stride" type="number" min="1" step="1" value="1" style="width:64px" />
+        <span class="hint">每 N 帧取一帧</span>
+      </div>
+
+      <hr />
+
+      <div class="mono" id="telemetry"></div>
+
+      <div class="hint">
+        支持字段：time,s,pitch,pitch_rate,lift,tilt,ceiling_z,floor_z,
+        rb_x,rb_z,rt_x,rt_z,fb_x,fb_z,ft_x,ft_z,clearance_top,clearance_bottom,
+        lift_cmd,tilt_cmd,speed_limit,safety_level,terrain_state,worst_point_id
+      </div>
+
+      <div class="hint">
+        JSONL：每行一个对象，字段名同上。
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    const fileInput = document.getElementById('file');
+    const cfgInput = document.getElementById('cfg');
+    const saveCfgBtn = document.getElementById('saveCfg');
+    const statusEl = document.getElementById('status');
+    const telemetryEl = document.getElementById('telemetry');
+
+    const frameSlider = document.getElementById('frame');
+    const frameText = document.getElementById('frameText');
+
+    const fpsSlider = document.getElementById('fps');
+    const fpsText = document.getElementById('fpsText');
+
+    const trimStartInput = document.getElementById('trimStart');
+    const trimEndInput = document.getElementById('trimEnd');
+    const strideInput = document.getElementById('stride');
+
+    const playBtn = document.getElementById('play');
+    const pauseBtn = document.getElementById('pause');
+    const stepBtn = document.getElementById('step');
+
+    /** @type {Array<any>} */
+    let rawSamples = [];
+    /** @type {Array<any>} */
+    let samples = [];
+    let playing = false;
+    let frame = 0;
+    let lastTick = 0;
+
+    let world = {
+      xmin: -2.0, xmax: 2.2,
+      zmin: -0.8, zmax: 3.0,
+    };
+
+    let modelCfg = {
+      units: 'm',
+      viewer: {
+        flip_log_x: true,
+        // Prefer strict, size-correct cargo derived from config + kinematics.
+        // Turn on to render cargo from logged corners instead.
+        use_log_cargo_corners: false,
+      },
+      environment: {
+        // Note: viewer kinematics/floor use a fixed C++ env convention:
+        // - container spans [door_x, door_x + length] in C++ coords
+        // - ramp/ground are on the left side (x < door_x)
+        // Any display mirroring should be done via viewer.flip_log_x.
+        container: { length: 10.0, height: 2.5, floor_z: 0.0, door_x: 0.0, direction: -1 },
+        ramp: { length: 2.5, slope_deg: 4.0 },
+        ground: { length: 8.0 },
+      },
+      vehicle: {
+        body: { length: 2.5, height: 1.8 },
+        wheels: { wheelbase: 2.0, rear_to_mast: 0.1, radius: 0.25 },
+        mast: { thickness: 0.1, height: 2.2, pivot_height: 0.2 },
+        fork: { length: 2.0, thickness: 0.05 },
+      },
+      cargo: {
+        length: 2.3,
+        height: 2.3,
+        // In fork-local coordinates: +x is "into container", +z is "up" in fork frame.
+        // Matches C++ defaults: mount forward 0.25 m, up 0.05 m.
+        mount_offset: { x: 0.25, z: 0.05 },
+      },
+    };
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    function parseCsv(text) {
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length < 2) return [];
+      const header = lines[0].split(',').map(s => s.trim());
+      const out = [];
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',');
+        if (parts.length < header.length) continue;
+        const o = {};
+        for (let k = 0; k < header.length; k++) {
+          const key = header[k];
+          const raw = (parts[k] ?? '').trim();
+          const num = Number(raw);
+          o[key] = Number.isFinite(num) ? num : raw;
+        }
+        out.push(o);
+      }
+      return out;
+    }
+
+    function parseJsonl(text) {
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+      const out = [];
+      for (const line of lines) {
+        out.push(JSON.parse(line));
+      }
+      return out;
+    }
+
+    function computeWorldBounds(samples) {
+      let xmin = Infinity, xmax = -Infinity;
+      let zmin = Infinity, zmax = -Infinity;
+
+      const flipX = !!modelCfg.viewer?.flip_log_x;
+      function logX(x) { return flipX ? -x : x; }
+
+      function add(x, z) {
+        if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+        xmin = Math.min(xmin, x);
+        xmax = Math.max(xmax, x);
+        zmin = Math.min(zmin, z);
+        zmax = Math.max(zmax, z);
+      }
+
+      for (const s of samples) {
+        // Logged corners (primary source of bounds if available)
+        add(logX(s.rb_x), s.rb_z);
+        add(logX(s.rt_x), s.rt_z);
+        add(logX(s.fb_x), s.fb_z);
+        add(logX(s.ft_x), s.ft_z);
+
+        // Add vehicle body/wheels for framing (calculate in C++ coords).
+        const s_cpp = s.s;  // Use raw logged value (C++ coords)
+        const wheelR = Number(modelCfg.vehicle?.wheels?.radius ?? 0.25);
+        const wb = Number(modelCfg.vehicle?.wheels?.wheelbase ?? 2.0);
+        const rearToMast = Number(modelCfg.vehicle?.wheels?.rear_to_mast ?? 0.1);
+        
+        // Wheels in C++ coords (behind mast in -x)
+        const frontWheelX_cpp = s_cpp - rearToMast;
+        const rearWheelX_cpp = frontWheelX_cpp - wb;
+        const floorAtFront = envFloorZAtX(frontWheelX_cpp);
+        const floorAtRear = envFloorZAtX(rearWheelX_cpp);
+        
+        // Convert to display coords for bounds
+        const frontWheelX = logX(frontWheelX_cpp);
+        const rearWheelX = logX(rearWheelX_cpp);
+        add(frontWheelX, floorAtFront);
+        add(rearWheelX, floorAtRear);
+        add(frontWheelX, floorAtFront + wheelR * 2);
+        add(rearWheelX, floorAtRear + wheelR * 2);
+
+        // model extents (calculate in C++ coords, flip only for display)
+        const door_cpp = modelCfg.environment.container.door_x;
+        const cLen = modelCfg.environment.container.length;
+        const cH = modelCfg.environment.container.height;
+        const floorZ = modelCfg.environment.container.floor_z;
+        const rampL = modelCfg.environment.ramp.length;
+        const slope = modelCfg.environment.ramp.slope_deg;
+        const h = Math.tan(slope * Math.PI / 180.0) * rampL;
+        const groundZ = floorZ - h;
+        const groundL = modelCfg.environment.ground.length;
+
+        // C++ environment: container spans [door, door + cLen], ramp on left side.
+        const containerEnd_cpp = door_cpp + cLen;
+        const rampStart_cpp = door_cpp - rampL;
+        const groundEnd_cpp = rampStart_cpp - groundL;
+        add(logX(door_cpp), floorZ);
+        add(logX(containerEnd_cpp), floorZ + cH);
+        add(logX(rampStart_cpp), groundZ);
+        add(logX(groundEnd_cpp), groundZ);
+      }
+
+      if (!Number.isFinite(xmin)) return world;
+
+      // Expand a bit
+      const dx = Math.max(1.0, (xmax - xmin) * 0.15);
+      const dz = Math.max(0.5, (zmax - zmin) * 0.15);
+      return {
+        xmin: xmin - dx,
+        xmax: xmax + dx,
+        zmin: zmin - dz,
+        zmax: zmax + dz,
+      };
+    }
+
+    function computeViewTransform() {
+      const pad = 24;
+      const dx = Math.max(1e-9, world.xmax - world.xmin);
+      const dz = Math.max(1e-9, world.zmax - world.zmin);
+      const sx = (canvas.width - 2 * pad) / dx;
+      const sz = (canvas.height - 2 * pad) / dz;
+      const scale = Math.max(1e-6, Math.min(sx, sz));
+      const cx = 0.5 * (world.xmin + world.xmax);
+      const cz = 0.5 * (world.zmin + world.zmax);
+      return { scale, cx, cz };
+    }
+
+    function w2s(x, z) {
+      const view = computeViewTransform();
+      return {
+        x: (x - view.cx) * view.scale + canvas.width * 0.5,
+        y: canvas.height * 0.5 - (z - view.cz) * view.scale,
+      };
+    }
+
+    function envGroundZ() {
+      const rampL = modelCfg.environment.ramp.length;
+      const slope = modelCfg.environment.ramp.slope_deg;
+      const floorZ = modelCfg.environment.container.floor_z;
+      return floorZ - Math.tan(slope * Math.PI / 180.0) * rampL;
+    }
+
+    function envFloorZAtX(x_cpp) {
+      // C++ hardcodes container extends in +x direction from door.
+      // This function always works in C++ coordinate system.
+      const door = modelCfg.environment.container.door_x;
+      const floorZ = modelCfg.environment.container.floor_z;
+      const containerLen = modelCfg.environment.container.length;
+      const rampL = modelCfg.environment.ramp.length;
+      const slope = modelCfg.environment.ramp.slope_deg;
+      const h = Math.tan(slope * Math.PI / 180.0) * rampL;
+      const groundZ = floorZ - h;
+      const rampStartX = door - rampL;
+
+      if (x_cpp >= door && x_cpp <= door + containerLen) return floorZ;  // inside container
+      if (x_cpp <= rampStartX) return groundZ;  // on ground
+      // on ramp: interpolate
+      const t = (x_cpp - rampStartX) / (door - rampStartX);
+      return groundZ + t * (floorZ - groundZ);
+    }
+
+    function colorForSafety(level) {
+      if (level === 0) return '#50c878';
+      if (level === 1) return '#f0c850';
+      if (level === 2) return '#f05050';
+      return '#a0a0dc';
+    }
+
+    function drawSample(s) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // background
+      ctx.fillStyle = 'rgba(20,20,24,0.98)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Interpret log x fields: apply flip for display.
+      const flipX = !!modelCfg.viewer?.flip_log_x;
+      function logX(x) { return flipX ? -x : x; }
+
+      // Environment: container box + ground + ramp
+      const door_cpp = modelCfg.environment.container.door_x;
+      const cLen = modelCfg.environment.container.length;
+      const cH = modelCfg.environment.container.height;
+      const floorZ = modelCfg.environment.container.floor_z;
+      const rampL = modelCfg.environment.ramp.length;
+      const groundL = modelCfg.environment.ground.length;
+      const groundZ = envGroundZ();
+      const containerEnd_cpp = door_cpp + cLen;
+      const rampStart_cpp = door_cpp - rampL;
+      const groundEnd_cpp = rampStart_cpp - groundL;
+
+      // container outline
+      ctx.strokeStyle = 'rgba(190,160,230,0.85)';
+      ctx.lineWidth = 2;
+      {
+        const x0 = logX(door_cpp);
+        const x1 = logX(containerEnd_cpp);
+        const a = w2s(x0, floorZ);
+        const b = w2s(x1, floorZ);
+        const c = w2s(x1, floorZ + cH);
+        const d = w2s(x0, floorZ + cH);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineTo(c.x, c.y);
+        ctx.lineTo(d.x, d.y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // ground segment
+      ctx.strokeStyle = 'rgba(40,160,200,0.9)';
+      ctx.lineWidth = 4;
+      {
+        const a = w2s(logX(rampStart_cpp), groundZ);
+        const b = w2s(logX(groundEnd_cpp), groundZ);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // ramp segment
+      ctx.strokeStyle = 'rgba(40,160,200,0.9)';
+      ctx.lineWidth = 4;
+      {
+        const a = w2s(logX(rampStart_cpp), groundZ);
+        const b = w2s(logX(door_cpp), floorZ);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // container floor line (emphasize)
+      ctx.strokeStyle = 'rgba(40,160,200,0.9)';
+      ctx.lineWidth = 4;
+      {
+        const a = w2s(logX(door_cpp), floorZ);
+        const b = w2s(logX(containerEnd_cpp), floorZ);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // door line at door_x
+      ctx.strokeStyle = 'rgba(210,210,225,0.9)';
+      ctx.lineWidth = 2;
+      {
+        const a = w2s(logX(door_cpp), floorZ);
+        const b = w2s(logX(door_cpp), floorZ + cH);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // ceiling line (top of container)
+      ctx.strokeStyle = 'rgba(140,140,165,0.6)';
+      ctx.lineWidth = 1;
+      {
+        const a = w2s(logX(door_cpp), floorZ + cH);
+        const b = w2s(logX(containerEnd_cpp), floorZ + cH);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      // Vehicle model (body + mast + wheels + forks)
+      const bodyL = modelCfg.vehicle.body.length;
+      const bodyH = modelCfg.vehicle.body.height;
+      const wb = modelCfg.vehicle.wheels.wheelbase;
+      const rearToMast = modelCfg.vehicle.wheels.rear_to_mast;
+      const wheelR = modelCfg.vehicle.wheels.radius;
+      const mastT = modelCfg.vehicle.mast.thickness;
+      const mastH = modelCfg.vehicle.mast.height;
+      const mastPivotH = modelCfg.vehicle.mast.pivot_height;
+      const forkL = modelCfg.vehicle.fork.length;
+      const forkT = modelCfg.vehicle.fork.thickness;
+
+      const cargoL = modelCfg.cargo.length;
+      const cargoH = modelCfg.cargo.height;
+      const cargoMountX = Number(modelCfg.cargo?.mount_offset?.x ?? 0);
+      const cargoMountZ = Number(modelCfg.cargo?.mount_offset?.z ?? 0);
+      const useLogCargoCorners = !!modelCfg.viewer?.use_log_cargo_corners;
+
+      // === CRITICAL: Compute in C++ coords, flip only for display ===
+      // All kinematics use C++ coordinate system (vehicle heads +x, wheels in -x).
+      // flip_log_x only affects final display coordinates, not internal calculations.
+      const s_cpp = s.s;  // Use raw logged value (C++ coords)
+      const mastBaseX_cpp = s_cpp;
+
+      // === C++ Kinematics Model ===
+      // Floor calculation: C++ hardcodes container extends +x from door.
+      // Must use C++ coords for floor lookup, regardless of flip setting.
+      const floorAtMast_cpp = envFloorZAtX(s_cpp);  // envFloorZAtX now expects C++ coords
+      const mastBase_cpp = { x: mastBaseX_cpp, z: floorAtMast_cpp + mastPivotH };
+
+      // Rotation angle: use logged pitch + tilt (C++ values)
+      const mastAngle = s.pitch + s.tilt;
+
+      // === Wheels (visual reference, C++ coords) ===
+      const frontWheelX_cpp = mastBaseX_cpp - rearToMast;
+      const rearWheelX_cpp = frontWheelX_cpp - wb;
+      const floorAtFront_cpp = envFloorZAtX(frontWheelX_cpp);
+      const floorAtRear_cpp = envFloorZAtX(rearWheelX_cpp);
+      const rearWheelZ = floorAtRear_cpp + wheelR;
+      const frontWheelZ = floorAtFront_cpp + wheelR;
+      const chassisPitch = Math.atan2(floorAtFront_cpp - floorAtRear_cpp, frontWheelX_cpp - rearWheelX_cpp);
+      
+      // Rotation matrix for mast angle
+      const cpM = Math.cos(mastAngle);
+      const spM = Math.sin(mastAngle);
+      function rotMast(x, z) {
+        return { x: cpM * x - spM * z, z: spM * x + cpM * z };
+      }
+
+      // Carriage (fork pivot) position in C++ coords
+      const liftTravel = s.lift;
+      const liftVec = rotMast(0, liftTravel);
+      const carriage_cpp = { x: mastBase_cpp.x + liftVec.x, z: mastBase_cpp.z + liftVec.z };
+
+      // Convert C++ coords to display coords for rendering
+      const mastBaseX = logX(mastBase_cpp.x);
+      const mastBase = { x: mastBaseX, z: mastBase_cpp.z };
+      const carriage = { x: logX(carriage_cpp.x), z: carriage_cpp.z };
+      const frontWheelX = logX(frontWheelX_cpp);
+      const rearWheelX = logX(rearWheelX_cpp);
+      const floorAtMast = floorAtMast_cpp;
+      
+      // Body rectangle pitched with chassis (derived from wheel contact)
+      const bodyGroundClearance = wheelR * 0.4;
+      const bodyBottomZ = floorAtFront_cpp + bodyGroundClearance;
+      const cpC = Math.cos(chassisPitch);
+      const cpS = Math.sin(chassisPitch);
+      function rotChassis(x, z) { return { x: cpC * x - cpS * z, z: cpS * x + cpC * z }; }
+
+      // Body origin at front wheel contact frame, extending backward (-x) in chassis frame.
+      const body_cpp = [
+        rotChassis(0, bodyGroundClearance),
+        rotChassis(-bodyL, bodyGroundClearance),
+        rotChassis(-bodyL, bodyGroundClearance + bodyH),
+        rotChassis(0, bodyGroundClearance + bodyH),
+      ].map(p => ({ x: frontWheelX_cpp + p.x, z: (floorAtFront_cpp) + p.z }));
+      const body = body_cpp.map(p => ({ x: logX(p.x), z: p.z }));
+      ctx.strokeStyle = 'rgba(20,110,140,0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      {
+        const p0 = w2s(body[0].x, body[0].z);
+        ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i < body.length; i++) {
+          const pi = w2s(body[i].x, body[i].z);
+          ctx.lineTo(pi.x, pi.y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // Mast: calculate in C++ coords, flip for display
+      const mast_cpp = [
+        { x: mastBase_cpp.x + rotMast(0, 0).x, z: mastBase_cpp.z + rotMast(0, 0).z },
+        { x: mastBase_cpp.x + rotMast(mastT, 0).x, z: mastBase_cpp.z + rotMast(mastT, 0).z },
+        { x: mastBase_cpp.x + rotMast(mastT, mastH).x, z: mastBase_cpp.z + rotMast(mastT, mastH).z },
+        { x: mastBase_cpp.x + rotMast(0, mastH).x, z: mastBase_cpp.z + rotMast(0, mastH).z },
+      ];
+      const mast = mast_cpp.map(p => ({ x: logX(p.x), z: p.z }));
+      
+      ctx.strokeStyle = 'rgba(20,110,140,0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      {
+        const p0 = w2s(mast[0].x, mast[0].z);
+        ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i < mast.length; i++) {
+          const pi = w2s(mast[i].x, mast[i].z);
+          ctx.lineTo(pi.x, pi.y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      function drawWheel(w) {
+        const center = w2s(w.x, w.z);
+        // approximate radius scaling in screen using world->screen delta in z
+        const rScreen = Math.abs(w2s(w.x, w.z + wheelR).y - center.y);
+        ctx.strokeStyle = 'rgba(15,70,90,0.95)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, rScreen, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      drawWheel({ x: frontWheelX, z: frontWheelZ });
+      drawWheel({ x: rearWheelX, z: rearWheelZ });
+
+      // Forks: calculate in C++ coords, flip for display.
+      const forkRect_cpp = [
+        rotMast(0, 0),
+        rotMast(forkL, 0),
+        rotMast(forkL, forkT),
+        rotMast(0, forkT),
+      ].map(p => ({ x: carriage_cpp.x + p.x, z: carriage_cpp.z + p.z }));
+      
+      // Convert to display coords
+      const forkRect = forkRect_cpp.map(p => ({ x: logX(p.x), z: p.z }));
+      
+      ctx.strokeStyle = 'rgba(15,70,90,0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      {
+        const q0 = w2s(forkRect[0].x, forkRect[0].z);
+        ctx.moveTo(q0.x, q0.y);
+        for (let i = 1; i < forkRect.length; i++) {
+          const qi = w2s(forkRect[i].x, forkRect[i].z);
+          ctx.lineTo(qi.x, qi.y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // Cargo: either from log corners (debug) or computed from config.
+      if (useLogCargoCorners &&
+          Number.isFinite(s.rb_x) && Number.isFinite(s.rb_z) &&
+          Number.isFinite(s.fb_x) && Number.isFinite(s.fb_z) &&
+          Number.isFinite(s.ft_x) && Number.isFinite(s.ft_z) &&
+          Number.isFinite(s.rt_x) && Number.isFinite(s.rt_z)) {
+        ctx.strokeStyle = colorForSafety(s.safety_level);
+        ctx.lineWidth = 3;
+        const rb = w2s(logX(s.rb_x), s.rb_z);
+        const fb = w2s(logX(s.fb_x), s.fb_z);
+        const ft = w2s(logX(s.ft_x), s.ft_z);
+        const rt = w2s(logX(s.rt_x), s.rt_z);
+        ctx.beginPath();
+        ctx.moveTo(rb.x, rb.y);
+        ctx.lineTo(fb.x, fb.y);
+        ctx.lineTo(ft.x, ft.y);
+        ctx.lineTo(rt.x, rt.y);
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        // Compute cargo in C++ coords, then flip for display.
+        const cargo_cpp = [
+          rotMast(cargoMountX, cargoMountZ),
+          rotMast(cargoMountX + cargoL, cargoMountZ),
+          rotMast(cargoMountX + cargoL, cargoMountZ + cargoH),
+          rotMast(cargoMountX, cargoMountZ + cargoH),
+        ].map(p => ({ x: carriage_cpp.x + p.x, z: carriage_cpp.z + p.z }));
+        
+        const cargo = cargo_cpp.map(p => ({ x: logX(p.x), z: p.z }));
+        
+        ctx.strokeStyle = colorForSafety(s.safety_level);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        const q0 = w2s(cargo[0].x, cargo[0].z);
+        ctx.moveTo(q0.x, q0.y);
+        for (let i = 1; i < cargo.length; i++) {
+          const qi = w2s(cargo[i].x, cargo[i].z);
+          ctx.lineTo(qi.x, qi.y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // pivot marker (fork pivot)
+      ctx.fillStyle = 'rgba(220,220,220,0.95)';
+      const pv = w2s(carriage.x, carriage.z);
+      ctx.beginPath();
+      ctx.arc(pv.x, pv.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // overlay text
+      ctx.fillStyle = 'rgba(235,235,245,0.92)';
+      ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+      ctx.fillText(`t=${s.time.toFixed(2)}s  s=${s.s.toFixed(2)}m`, 12, 20);
+      ctx.fillText(`pitch(log)=${(s.pitch*180/Math.PI).toFixed(2)}deg  pitch(wheels)=${(chassisPitch*180/Math.PI).toFixed(2)}deg`, 12, 38);
+      ctx.fillText(`lift=${s.lift.toFixed(3)}m  tilt=${(s.tilt*180/Math.PI).toFixed(2)}deg`, 12, 56);
+      ctx.fillText(`clear_top=${s.clearance_top.toFixed(3)}m  clear_bottom=${s.clearance_bottom.toFixed(3)}m  speed=${s.speed_limit.toFixed(2)}m/s`, 12, 74);
+      ctx.fillText(`safety=${s.safety_level}  terrain=${s.terrain_state}  worst=${s.worst_point_id}`, 12, 92);
+    }
+
+    function rebuildFiltered() {
+      if (!rawSamples.length) return;
+      const trimStart = Number(trimStartInput.value) || 0;
+      const trimEnd = Number(trimEndInput.value) || 0;
+      const stride = Math.max(1, Math.floor(Number(strideInput.value) || 1));
+      const minS = rawSamples[0].s;
+      const maxS = rawSamples[rawSamples.length - 1].s;
+      const sLo = minS + trimStart;
+      const sHi = maxS - trimEnd;
+
+      const windowed = rawSamples.filter(s => s.s >= sLo && s.s <= sHi);
+      const strided = windowed.filter((_, idx) => (idx % stride) === 0);
+
+      samples = strided;
+      frame = 0;
+      frameSlider.min = '0';
+      frameSlider.max = String(Math.max(0, samples.length - 1));
+      frameSlider.value = '0';
+      if (samples.length) {
+        world = computeWorldBounds(samples);
+      }
+      render();
+    }
+
+    function render() {
+      if (!samples.length) return;
+      frame = clamp(frame, 0, samples.length - 1);
+      const s = samples[frame];
+      drawSample(s);
+
+      frameSlider.value = String(frame);
+      frameText.textContent = `${frame}/${samples.length-1}`;
+      telemetryEl.textContent =
+        `time: ${s.time.toFixed(3)}\n` +
+        `s: ${s.s.toFixed(3)}\n` +
+        `pitch(rad): ${s.pitch.toFixed(4)}\n` +
+        `lift(m): ${s.lift.toFixed(4)}\n` +
+        `tilt(rad): ${s.tilt.toFixed(4)}\n` +
+        `clear_top(m): ${s.clearance_top.toFixed(4)}\n` +
+        `clear_bottom(m): ${s.clearance_bottom.toFixed(4)}\n` +
+        `lift_cmd(m): ${s.lift_cmd.toFixed(4)}\n` +
+        `tilt_cmd(rad): ${s.tilt_cmd.toFixed(4)}\n`;
+    }
+
+    function tick(ts) {
+      if (!lastTick) lastTick = ts;
+      const dt = (ts - lastTick) / 1000;
+      lastTick = ts;
+
+      const fps = Number(fpsSlider.value);
+      const step = Math.max(1, Math.round((dt * fps) * 1.0));
+
+      if (playing && samples.length) {
+        frame = Math.min(frame + step, samples.length - 1);
+        if (frame === samples.length - 1) playing = false;
+        render();
+      }
+
+      requestAnimationFrame(tick);
+    }
+
+    fileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files?.[0];
+      if (!f) return;
+      const text = await f.text();
+      try {
+        let arr;
+        if (f.name.toLowerCase().endsWith('.csv')) arr = parseCsv(text);
+        else if (f.name.toLowerCase().endsWith('.jsonl')) arr = parseJsonl(text);
+        else arr = JSON.parse(text);
+
+        // normalize required numeric fields
+        rawSamples = arr.map(o => ({
+          time: Number(o.time),
+          s: Number(o.s),
+          pitch: Number(o.pitch),
+          pitch_rate: Number(o.pitch_rate ?? 0),
+          lift: Number(o.lift),
+          tilt: Number(o.tilt),
+          ceiling_z: Number(o.ceiling_z),
+          floor_z: Number(o.floor_z),
+          rb_x: Number(o.rb_x), rb_z: Number(o.rb_z),
+          rt_x: Number(o.rt_x), rt_z: Number(o.rt_z),
+          fb_x: Number(o.fb_x), fb_z: Number(o.fb_z),
+          ft_x: Number(o.ft_x), ft_z: Number(o.ft_z),
+          clearance_top: Number(o.clearance_top),
+          clearance_bottom: Number(o.clearance_bottom),
+          lift_cmd: Number(o.lift_cmd ?? o.lift_target ?? 0),
+          tilt_cmd: Number(o.tilt_cmd ?? o.tilt_target ?? 0),
+          speed_limit: Number(o.speed_limit ?? 0),
+          safety_level: Number(o.safety_level ?? 0),
+          terrain_state: Number(o.terrain_state ?? 0),
+          worst_point_id: Number(o.worst_point_id ?? 0),
+        })).filter(s => Number.isFinite(s.time));
+
+        samples = rawSamples;
+        playing = false;
+        statusEl.textContent = `已加载：${f.name}  frames=${samples.length}`;
+        statusEl.className = 'hint';
+        rebuildFiltered();
+      } catch (e) {
+        statusEl.textContent = `解析失败：${e}`;
+        statusEl.className = 'hint bad';
+        samples = [];
+        rawSamples = [];
+      }
+    });
+
+    cfgInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files?.[0];
+      if (!f) return;
+      try {
+        const text = await f.text();
+        const parsed = JSON.parse(text);
+        // shallow merge for safety
+        modelCfg = { ...modelCfg, ...parsed };
+        statusEl.textContent = `已加载配置：${f.name}` + (samples.length ? `  frames=${samples.length}` : '');
+        statusEl.className = 'hint';
+        if (samples.length) rebuildFiltered();
+      } catch (e) {
+        statusEl.textContent = `配置解析失败：${e}`;
+        statusEl.className = 'hint bad';
+      }
+    });
+
+    saveCfgBtn.addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(modelCfg, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'model_config.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    frameSlider.addEventListener('input', () => {
+      frame = Number(frameSlider.value);
+      playing = false;
+      render();
+    });
+
+    fpsSlider.addEventListener('input', () => {
+      fpsText.textContent = String(fpsSlider.value);
+    });
+
+    trimStartInput.addEventListener('change', rebuildFiltered);
+    trimEndInput.addEventListener('change', rebuildFiltered);
+    strideInput.addEventListener('change', rebuildFiltered);
+
+    playBtn.addEventListener('click', () => { playing = true; });
+    pauseBtn.addEventListener('click', () => { playing = false; });
+    stepBtn.addEventListener('click', () => {
+      playing = false;
+      frame = Math.min(frame + 1, Math.max(0, samples.length - 1));
+      render();
+    });
+
+    fpsText.textContent = String(fpsSlider.value);
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
