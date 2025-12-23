@@ -15,6 +15,7 @@ add_library(truck_load_control)
 target_sources(truck_load_control
   PRIVATE
     src/Controller.cpp
+    src/ControllerMPC.cpp
     src/Geometry.cpp
     src/CsvLog.cpp
 )

@@ -1,27 +1,26 @@
 #pragma once
 
 #include "controller/IController.hpp"
-#include "controller/Types.hpp"
 
 namespace tlf {
 
-class Controller : public IController {
+// A lightweight, real-time friendly MPC-style controller using short-horizon beam search.
+// It reuses the same geometry + clearance constraints as the grid-search controller.
+class ControllerMPC final : public IController {
  public:
-  explicit Controller(ControllerConfig cfg = {});
+  explicit ControllerMPC(ControllerConfig cfg = {});
 
   const ControllerConfig& config() const override { return cfg_; }
   ControllerConfig& config() override { return cfg_; }
 
-  // Stateless from caller perspective; internal state is used only for smoothing.
   DebugFrame step(const ControlInput& in) override;
-
   void reset() override;
 
  private:
   ControllerConfig cfg_;
   double time_s_{0.0};
 
-  // smoothing memory
+  // smoothing memory (for cost regularization, not plant feedback)
   double prev_lift_rate_m_s_{0.0};
   double prev_tilt_rate_rad_s_{0.0};
 };

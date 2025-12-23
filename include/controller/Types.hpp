@@ -90,8 +90,8 @@ struct DebugFrame {
 
 struct ControllerConfig {
   // Margins and thresholds
-  double margin_top_m{0.08};
-  double margin_bottom_m{0.08};
+  double margin_top_m{0.04};
+  double margin_bottom_m{0.04};
   double warn_threshold_m{0.12};
   double hard_threshold_m{0.00};
 
@@ -127,6 +127,19 @@ struct ControllerConfig {
   double degraded_margin_multiplier{2.0};
   double degraded_rate_multiplier{0.5};
   double degraded_speed_multiplier{0.5};
+
+  // -------------------- MPC (optional controller) --------------------
+  // Short-horizon predictive search settings. Used only by ControllerMPC.
+  int mpc_horizon_steps{5};
+  int mpc_beam_width{40};
+
+  // Assumed forward speed used for predicting s over the horizon.
+  // If set to 0, MPC will assume s is constant (no forward motion prediction).
+  double mpc_assumed_forward_speed_m_s{0.0};
+
+  // Pitch prediction model over the horizon: pitch_k = pitch + pitch_rate * dt * k.
+  // 0 disables pitch prediction (treat pitch constant over horizon).
+  double mpc_use_pitch_rate_prediction{1.0};
 };
 
 }  // namespace tlf

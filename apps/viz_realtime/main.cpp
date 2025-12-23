@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "controller/Controller.hpp"
+#include "controller/ControllerFactory.hpp"
 #include "model/Geometry.hpp"
 
 #include "imgui.h"
@@ -135,9 +136,9 @@ static double pitchFromTerrain(TerrainState t, double s) {
   }
 }
 
-static std::vector<VizSample> buildBuiltinTrajectory(const ControllerConfig& cfg, int steps = 900) {
-  Controller controller(cfg);
-  controller.reset();
+static std::vector<VizSample> buildBuiltinTrajectory(const ControllerConfig& cfg, ControllerKind kind, int steps = 900) {
+  auto controller = makeController(kind, cfg);
+  controller->reset();
 
   RackParams rack;
   rack.height_m = 2.3;
@@ -180,7 +181,7 @@ static std::vector<VizSample> buildBuiltinTrajectory(const ControllerConfig& cfg
     in.forklift = fl;
     in.inputs_valid = true;
 
-    const DebugFrame fr = controller.step(in);
+    const DebugFrame fr = controller->step(in);
 
     VizSample vs;
     vs.time_s = fr.time_s;
@@ -289,8 +290,10 @@ static void drawScene2D(const VizSample& s, const ImVec2& canvas_pos, const ImVe
 
 int main(int argc, char** argv) {
   std::string log_path;
+  ControllerKind controller_kind = ControllerKind::GridSearch;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--log" && i + 1 < argc) log_path = argv[++i];
+    if (std::string(argv[i]) == "--controller" && i + 1 < argc) controller_kind = controllerKindFromString(argv[++i]);
   }
 
   if (!glfwInit()) {
@@ -326,7 +329,7 @@ int main(int argc, char** argv) {
 
   auto rebuild = [&]() {
     if (mode == Mode::Builtin) {
-      samples = buildBuiltinTrajectory(cfg);
+      samples = buildBuiltinTrajectory(cfg, controller_kind);
     } else {
       std::vector<VizSample> tmp;
       if (loadCsvLog(std::string(log_path_buf), &tmp)) samples = std::move(tmp);
@@ -369,6 +372,16 @@ int main(int argc, char** argv) {
       ImGui::InputText("CSV log path", log_path_buf, sizeof(log_path_buf));
       ImGui::SameLine();
       if (ImGui::Button("Load")) {
+        idx = 0;
+        rebuild();
+      }
+    }
+
+    if (mode == Mode::Builtin) {
+      const char* ctrl_items[] = {"Grid search", "MPC (beam search)"};
+      int ctrl_i = (controller_kind == ControllerKind::GridSearch) ? 0 : 1;
+      if (ImGui::Combo("Controller", &ctrl_i, ctrl_items, 2)) {
+        controller_kind = (ctrl_i == 0) ? ControllerKind::GridSearch : ControllerKind::MPC;
         idx = 0;
         rebuild();
       }
@@ -420,6 +433,15 @@ int main(int argc, char** argv) {
       changed |= ImGui::SliderFloat("lift_rate_limit", (float*)&cfg.base_lift_rate_limit_m_s, 0.02f, 0.80f);
       changed |= ImGui::SliderFloat("tilt_rate_limit", (float*)&cfg.base_tilt_rate_limit_rad_s, 0.05f, 1.50f);
       changed |= ImGui::SliderFloat("base_speed_limit", (float*)&cfg.base_speed_limit_m_s, 0.05f, 2.00f);
+
+      if (mode == Mode::Builtin && controller_kind == ControllerKind::MPC) {
+        ImGui::Separator();
+        ImGui::Text("MPC Params");
+        changed |= ImGui::SliderInt("mpc_horizon_steps", &cfg.mpc_horizon_steps, 1, 12);
+        changed |= ImGui::SliderInt("mpc_beam_width", &cfg.mpc_beam_width, 5, 120);
+        changed |= ImGui::SliderFloat("mpc_assumed_forward_speed", (float*)&cfg.mpc_assumed_forward_speed_m_s, 0.0f, 1.5f);
+        changed |= ImGui::SliderFloat("mpc_use_pitch_rate_pred", (float*)&cfg.mpc_use_pitch_rate_prediction, 0.0f, 1.0f);
+      }
 
       if (changed && mode == Mode::Builtin) {
         const int keep = idx;

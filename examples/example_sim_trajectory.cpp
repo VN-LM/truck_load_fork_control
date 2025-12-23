@@ -3,6 +3,7 @@
 #include <string>
 
 #include "controller/Controller.hpp"
+#include "controller/ControllerFactory.hpp"
 #include "utils/CsvLog.hpp"
 
 using namespace tlf;
@@ -78,14 +79,16 @@ static TerrainState terrainFromPitch(double pitch_rad) {
 }
 
 int main(int argc, char** argv) {
-  std::string out_path = "/tmp/tlf_log.csv";
+  // Default to a local file (easier to pick in the web viewer than macOS /tmp).
+  std::string out_path = "tlf_log.csv";
+  ControllerKind controller_kind = ControllerKind::GridSearch;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--out" && i + 1 < argc) out_path = argv[++i];
+    if (std::string(argv[i]) == "--controller" && i + 1 < argc) controller_kind = controllerKindFromString(argv[++i]);
   }
 
-  Controller controller;
+  ControllerConfig cfg;
   {
-    ControllerConfig cfg;
     // Keep more headroom to the ceiling throughout.
     // Note: total required (top+bottom) margin must remain physically feasible given rack height.
     cfg.margin_top_m = 0.12;
@@ -105,11 +108,18 @@ int main(int argc, char** argv) {
   // using the same (lift, tilt) can be overly conservative and lead to stalling.
   cfg.lookahead_s_m = 0.0;
 
+    // If using MPC in this sim, give it a reasonable forward-speed guess for s prediction.
+    // (The plant actually advances using min(v, speed_limit).)
+    if (controller_kind == ControllerKind::MPC) {
+      cfg.mpc_assumed_forward_speed_m_s = 0.1;
+    }
+
     cfg.base_lift_rate_limit_m_s = 0.18;
     cfg.base_tilt_rate_limit_rad_s = 0.28;
-    controller = Controller(cfg);
   }
-  controller.reset();
+
+  auto controller = makeController(controller_kind, cfg);
+  controller->reset();
 
   CsvLogger log(out_path);
   if (!log.good()) {
@@ -169,7 +179,7 @@ int main(int argc, char** argv) {
     in.forklift = fl;
     in.inputs_valid = true;
 
-    const DebugFrame fr = controller.step(in);
+    const DebugFrame fr = controller->step(in);
 
     // simple actuator following: rate-limited towards targets
     const double lift_err = fr.cmd.lift_target_m - st.lift_m;
