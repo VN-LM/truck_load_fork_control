@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420">
+  <defs>
+    <style>
+      .axis { stroke: #000; stroke-width: 2; fill: none; }
+      .thin { stroke: #000; stroke-width: 1.5; fill: none; }
+      .dash { stroke: #000; stroke-width: 1.5; fill: none; stroke-dasharray: 8 6; }
+      .rack { stroke: #000; stroke-width: 2.5; fill: none; }
+      .label { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Arial; font-size: 16px; fill: #000; }
+      .small { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Arial; font-size: 14px; fill: #000; }
+      .point { fill: #000; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#000" />
+    </marker>
+  </defs>
+
+  <!-- Plot area margins -->
+  <rect x="0" y="0" width="980" height="420" fill="#fff" />
+
+  <!-- Axes -->
+  <line class="axis" x1="90" y1="340" x2="900" y2="340" />
+  <line class="axis" x1="90" y1="340" x2="90" y2="70" />
+  <text class="label" x="910" y="345">x</text>
+  <text class="label" x="80" y="60">z</text>
+
+  <!-- Doorway marker at x=0 (illustrative) -->
+  <line class="dash" x1="350" y1="80" x2="350" y2="360" />
+  <text class="small" x="330" y="375">x = 0 (door)</text>
+
+  <!-- Floor profile (ramp -> container) -->
+  <path class="thin" d="M110 320 L300 320 L430 295 L620 295 L860 295" />
+  <text class="label" x="120" y="305">floor_z(x)</text>
+
+  <!-- Ceiling profile -->
+  <path class="thin" d="M110 120 L300 120 L430 130 L620 130 L860 130" />
+  <text class="label" x="120" y="110">ceiling_z(x)</text>
+
+  <!-- Mast base at s -->
+  <circle class="point" cx="280" cy="320" r="5" />
+  <text class="small" x="235" y="360">mast_base = (s, floor_z(s)+mast_pivot_height)</text>
+  <line class="dash" x1="280" y1="320" x2="280" y2="265" />
+  <text class="small" x="290" y="290">mast_pivot_height</text>
+
+  <!-- Pivot after lift along rotated mast -->
+  <circle class="point" cx="305" cy="245" r="5" />
+  <text class="small" x="318" y="248">pivot</text>
+  <line class="dash" x1="280" y1="265" x2="305" y2="245" />
+  <text class="small" x="310" y="270">R(θ)·(0,lift)</text>
+
+  <!-- Rack rectangle (slightly rotated) -->
+  <!-- Coordinates chosen manually for illustration -->
+  <polygon class="rack" points="345,270 370,185 520,230 495,315" />
+
+  <!-- Corner points -->
+  <circle class="point" cx="345" cy="270" r="4" />
+  <circle class="point" cx="370" cy="185" r="4" />
+  <circle class="point" cx="495" cy="315" r="4" />
+  <circle class="point" cx="520" cy="230" r="4" />
+
+  <text class="small" x="330" y="265">RB</text>
+  <text class="small" x="356" y="180">RT</text>
+  <text class="small" x="480" y="332">FB</text>
+  <text class="small" x="525" y="225">FT</text>
+
+  <!-- mount_offset arrow from pivot to RB -->
+  <line class="thin" x1="305" y1="245" x2="345" y2="270" marker-end="url(#arrow)" />
+  <text class="small" x="310" y="235">R(θ)·mount_offset</text>
+
+  <!-- clearance arrows -->
+  <!-- top clearance at FT -->
+  <line class="thin" x1="520" y1="230" x2="520" y2="130" marker-end="url(#arrow)" />
+  <text class="small" x="535" y="175">ceiling_z(x_FT) - z_FT</text>
+
+  <!-- bottom clearance at FB -->
+  <line class="thin" x1="495" y1="315" x2="495" y2="295" marker-end="url(#arrow)" />
+  <text class="small" x="510" y="310">z_FB - floor_z(x_FB)</text>
+
+  <!-- worst-point min operation hints -->
+  <text class="label" x="610" y="205">Top clearance = min(RT, FT) - margin_top</text>
+  <text class="label" x="610" y="235">Bottom clearance = min(RB, FB) - margin_bottom</text>
+  <text class="label" x="610" y="265">Feasible iff both ≥ 0</text>
+
+  <!-- theta label -->
+  <text class="label" x="610" y="135">θ = pitch + tilt</text>
+</svg>
