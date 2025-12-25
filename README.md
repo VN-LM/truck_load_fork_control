@@ -112,6 +112,10 @@ ctest --test-dir build --output-on-failure
 - 参数调试指南：docs/tuning_guide.md
 - 日志格式：docs/log_format.md
 
+## Demo
+
+- 实时可视化效果录屏：docs/demo_viz_realtime_2025-12-25_100540.mov
+
 ## 作为库接入（最小示例）
 
 如果你想把控制内核接到自己的工程里，最简单方式是 `add_subdirectory`：
