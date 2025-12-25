@@ -81,9 +81,15 @@ ClearanceResult computeClearances(const CornerPoints2D& corners,
   const double clearance_top_m = topWorst.value - margin_top_m;
   const double clearance_bottom_m = botWorst.value - margin_bottom_m;
 
-  CornerId worst = (clearance_top_m < clearance_bottom_m) ? topWorst.id : botWorst.id;
+  const CornerId worst = (clearance_top_m < clearance_bottom_m) ? topWorst.id : botWorst.id;
 
-  return ClearanceResult{clearance_top_m, clearance_bottom_m, worst};
+  ClearanceResult out;
+  out.clearance_top_m = clearance_top_m;
+  out.clearance_bottom_m = clearance_bottom_m;
+  out.top_worst_point = topWorst.id;
+  out.bottom_worst_point = botWorst.id;
+  out.worst_point = worst;
+  return out;
 }
 
 std::string toString(CornerId id) {

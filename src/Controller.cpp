@@ -120,8 +120,28 @@ DebugFrame Controller::step(const ControlInput& in) {
                                       ? computeClearances(computeRackCorners2D(s_look, in.lift_pos_m, in.pitch_rad, in.tilt_rad, in.env, in.rack, in.forklift),
                                                          in.env, margin_top, margin_bottom)
                                       : current_clear;
-  const double current_clear_top_worst = std::min(current_clear.clearance_top_m, current_clear_ahead.clearance_top_m);
-  const double current_clear_bottom_worst = std::min(current_clear.clearance_bottom_m, current_clear_ahead.clearance_bottom_m);
+
+  auto worstCaseClearance = [](const ClearanceResult& now, const ClearanceResult& ahead) {
+    ClearanceResult out = now;
+
+    if (ahead.clearance_top_m < now.clearance_top_m) {
+      out.clearance_top_m = ahead.clearance_top_m;
+      out.top_worst_point = ahead.top_worst_point;
+    }
+    if (ahead.clearance_bottom_m < now.clearance_bottom_m) {
+      out.clearance_bottom_m = ahead.clearance_bottom_m;
+      out.bottom_worst_point = ahead.bottom_worst_point;
+    }
+
+    out.worst_point = (out.clearance_top_m < out.clearance_bottom_m) ? out.top_worst_point : out.bottom_worst_point;
+    return out;
+  };
+
+  const auto current_clear_worst = (cfg_.lookahead_s_m > 1e-9)
+                                     ? worstCaseClearance(current_clear, current_clear_ahead)
+                                     : current_clear;
+  const double current_clear_top_worst = current_clear_worst.clearance_top_m;
+  const double current_clear_bottom_worst = current_clear_worst.clearance_bottom_m;
 
   // Search candidates
   const int nL = std::max(3, cfg_.grid_lift_steps);
@@ -171,9 +191,8 @@ DebugFrame Controller::step(const ControlInput& in) {
       if (cfg_.lookahead_s_m > 1e-9) {
         const auto corners_a = computeRackCorners2D(s_look, lift_c, in.pitch_rad, tilt_c, in.env, in.rack, in.forklift);
         const auto clr_a = computeClearances(corners_a, in.env, margin_top, margin_bottom);
-        clr_worst.clearance_top_m = std::min(clr.clearance_top_m, clr_a.clearance_top_m);
-        clr_worst.clearance_bottom_m = std::min(clr.clearance_bottom_m, clr_a.clearance_bottom_m);
-        clr_worst.worst_point = (clr_worst.clearance_top_m < clr_worst.clearance_bottom_m) ? clr.worst_point : clr.worst_point;
+
+        clr_worst = worstCaseClearance(clr, clr_a);
       }
 
       const double min_clear = std::min(clr_worst.clearance_top_m, clr_worst.clearance_bottom_m);
@@ -257,12 +276,12 @@ DebugFrame Controller::step(const ControlInput& in) {
 
   // Safety status
   if (degraded) {
-    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear.worst_point,
+    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear_worst.worst_point,
                           true, degraded_code, degraded_msg);
   } else {
     SafetyCode code = (search_code != SafetyCode::None) ? search_code : SafetyCode::None;
     std::string msg = (!search_msg.empty()) ? search_msg : std::string{};
-    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear.worst_point,
+    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear_worst.worst_point,
                           false, code, msg);
   }
 

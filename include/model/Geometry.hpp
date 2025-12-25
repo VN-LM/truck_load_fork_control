@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <functional>
 #include <optional>
 #include <string>
@@ -53,6 +54,11 @@ struct CornerPoints2D {
 struct ClearanceResult {
   double clearance_top_m{0.0};
   double clearance_bottom_m{0.0};
+
+  // Per-surface worst corners (before comparing top vs bottom).
+  CornerId top_worst_point{CornerId::RearTop};
+  CornerId bottom_worst_point{CornerId::RearBottom};
+
   CornerId worst_point{CornerId::RearBottom};
 };
 

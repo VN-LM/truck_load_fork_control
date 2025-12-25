@@ -135,8 +135,28 @@ DebugFrame ControllerMPC::step(const ControlInput& in) {
                                             in.env, margin_top, margin_bottom)
                                       : current_clear;
 
-  const double current_clear_top_worst = std::min(current_clear.clearance_top_m, current_clear_ahead.clearance_top_m);
-  const double current_clear_bottom_worst = std::min(current_clear.clearance_bottom_m, current_clear_ahead.clearance_bottom_m);
+  auto worstCaseClearance = [](const ClearanceResult& now, const ClearanceResult& ahead) {
+    ClearanceResult out = now;
+
+    if (ahead.clearance_top_m < now.clearance_top_m) {
+      out.clearance_top_m = ahead.clearance_top_m;
+      out.top_worst_point = ahead.top_worst_point;
+    }
+    if (ahead.clearance_bottom_m < now.clearance_bottom_m) {
+      out.clearance_bottom_m = ahead.clearance_bottom_m;
+      out.bottom_worst_point = ahead.bottom_worst_point;
+    }
+
+    out.worst_point = (out.clearance_top_m < out.clearance_bottom_m) ? out.top_worst_point : out.bottom_worst_point;
+    return out;
+  };
+
+  const auto current_clear_worst = (cfg_.lookahead_s_m > 1e-9)
+                                     ? worstCaseClearance(current_clear, current_clear_ahead)
+                                     : current_clear;
+
+  const double current_clear_top_worst = current_clear_worst.clearance_top_m;
+  const double current_clear_bottom_worst = current_clear_worst.clearance_bottom_m;
 
   // MPC/beam-search parameters
   const int H = std::max(1, cfg_.mpc_horizon_steps);
@@ -346,12 +366,12 @@ DebugFrame ControllerMPC::step(const ControlInput& in) {
 
   // Safety
   if (degraded) {
-    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear.worst_point,
+    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear_worst.worst_point,
                           true, degraded_code, degraded_msg);
   } else {
     SafetyCode code = (search_code != SafetyCode::None) ? search_code : SafetyCode::None;
     std::string msg = search_msg;
-    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear.worst_point,
+    f.safety = makeSafety(cfg_, current_clear_top_worst, current_clear_bottom_worst, current_clear_worst.worst_point,
                           false, code, msg);
   }
 

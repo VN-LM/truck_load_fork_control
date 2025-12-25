@@ -83,6 +83,9 @@ if(TLF_BUILD_VIZ)
       glfw
       OpenGL::GL
   )
+  if(APPLE)
+    target_compile_definitions(viz_realtime PRIVATE GL_SILENCE_DEPRECATION)
+  endif()
   target_compile_definitions(viz_realtime PRIVATE IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 endif()
 
